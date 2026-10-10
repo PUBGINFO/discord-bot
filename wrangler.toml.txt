@@ -1,0 +1,17 @@
+name = "discord-bot"
+main = "worker.js"
+compatibility_date = "2024-01-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "discord-scheduler"
+database_id = "2d84c9c2-0f16-4a15-80cd-e5fb7f913cef"
+
+[durable_objects]
+bindings = [
+  { name = "SCHEDULER_DO", class_name = "PrecisionSchedulerDO" }
+]
+
+[[migrations]]
+tag = "v1"
+new_classes = ["PrecisionSchedulerDO"]

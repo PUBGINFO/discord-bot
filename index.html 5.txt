@@ -1,0 +1,566 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Scrim Scheduler</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#131417;
+    --bg-elevated:#1c1e23;
+    --bg-card:#1a1c21;
+    --border:#2a2d35;
+    --border-soft:#232529;
+    --text:#e8e9ed;
+    --text-dim:#8b8d98;
+    --text-faint:#5c5f6a;
+    --indigo:#6c5ce7;
+    --indigo-bright:#8b7ef5;
+    --indigo-dim:#453a8f;
+    --amber:#f5a623;
+    --amber-dim:#8a6420;
+    --red:#e5484d;
+    --red-dim:#4d2426;
+    --green:#3dd68c;
+    --radius:14px;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0;
+    background:
+      radial-gradient(ellipse 900px 500px at 15% -10%, rgba(108,92,231,0.16), transparent 60%),
+      radial-gradient(ellipse 700px 400px at 100% 0%, rgba(245,166,35,0.08), transparent 55%),
+      var(--bg);
+    color:var(--text);
+    font-family:'Inter',-apple-system,BlinkMacSystemFont,sans-serif;
+    min-height:100vh;
+    -webkit-font-smoothing:antialiased;
+    position:relative;
+    padding-bottom:40px;
+  }
+  .display{font-family:'Space Grotesk',sans-serif;}
+  .mono{font-family:'JetBrains Mono',monospace;}
+
+  .wrap{max-width:760px;margin:0 auto;padding:48px 20px 60px;}
+
+  /* Header */
+  header{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;margin-bottom:40px;}
+  .brand{display:flex;align-items:center;gap:12px;}
+  .brand-mark{
+    width:40px;height:40px;border-radius:11px;
+    background:linear-gradient(135deg, var(--indigo), #4a3fb8);
+    display:flex;align-items:center;justify-content:center;
+    box-shadow:0 4px 20px rgba(108,92,231,0.35);
+    flex-shrink:0;
+  }
+  .brand-mark svg{width:20px;height:20px;}
+  
+  .title-row{display:flex;align-items:center;gap:10px;}
+  h1{font-size:22px;font-weight:700;margin:0;letter-spacing:-0.02em;}
+  
+  .version-badge{
+    font-family:'JetBrains Mono',monospace;
+    font-size:11px;font-weight:600;
+    background:rgba(108,92,231,0.15);color:var(--indigo-bright);
+    padding:2px 8px;border-radius:999px;border:1px solid rgba(108,92,231,0.3);
+  }
+
+  #user-status{font-size:13px;color:var(--text-dim);margin:4px 0 0;}
+  #user-status .dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--text-faint);margin-right:6px;}
+  #user-status.online .dot{background:var(--green);box-shadow:0 0 6px var(--green);}
+
+  .btn{
+    border:none;border-radius:10px;font-weight:600;font-size:13.5px;
+    padding:10px 18px;cursor:pointer;transition:all .15s ease;
+    font-family:inherit;
+  }
+  .btn-primary{background:var(--indigo);color:#fff;}
+  .btn-primary:hover{background:var(--indigo-bright);transform:translateY(-1px);}
+  .btn-danger{background:var(--red-dim);color:#ff9b9e;}
+  .btn-danger:hover{background:#5c2c2f;}
+  .btn:active{transform:translateY(0);}
+
+  /* Card */
+  .card{
+    background:var(--bg-card);
+    border:1px solid var(--border-soft);
+    border-radius:var(--radius);
+    padding:26px;
+    margin-bottom:24px;
+  }
+  .card-head{display:flex;align-items:center;gap:10px;margin-bottom:22px;}
+  .card-eyebrow{
+    font-size:11px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;
+    color:var(--amber);
+  }
+  .card h2{font-size:17px;margin:0;font-weight:600;letter-spacing:-0.01em;}
+
+  label{display:block;font-size:12.5px;font-weight:600;color:var(--text-dim);margin-bottom:7px;letter-spacing:.01em;}
+  .field{margin-bottom:18px;}
+  .field-row{display:grid;grid-template-columns:1fr;gap:12px;}
+
+  select, input[type=text], input[type=datetime-local], textarea{
+    width:100%;background:var(--bg-elevated);
+    border:1px solid var(--border);border-radius:9px;
+    padding:11px 13px;color:var(--text);font-size:14px;
+    font-family:inherit;outline:none;transition:border-color .15s;
+  }
+  select:focus, input:focus, textarea:focus{border-color:var(--indigo);}
+  textarea{resize:vertical;line-height:1.5;}
+  input[type=number]{
+    width:100%;background:var(--bg-elevated);border:1px solid var(--border);
+    border-radius:9px;padding:11px 8px;color:var(--text);font-size:14px;
+    text-align:center;font-family:'JetBrains Mono',monospace;outline:none;
+  }
+  input[type=number]:focus{border-color:var(--indigo);}
+
+  .char-count{font-size:11px;color:var(--text-faint);font-family:'JetBrains Mono',monospace;}
+  .field-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:7px;}
+  .field-head label{margin:0;}
+
+  /* Role chips */
+  #role-chip-list{display:flex;flex-wrap:wrap;gap:8px;}
+  .role-chip{
+    display:inline-flex;align-items:center;gap:6px;
+    background:var(--bg-elevated);border:1px solid var(--border);
+    border-radius:999px;padding:7px 14px 7px 10px;
+    font-size:13px;font-weight:500;cursor:pointer;
+    transition:all .15s ease;user-select:none;
+  }
+  .role-chip .swatch{width:8px;height:8px;border-radius:50%;background:var(--text-faint);flex-shrink:0;}
+  .role-chip:hover{border-color:var(--text-faint);}
+  .role-chip.selected{background:rgba(108,92,231,0.18);border-color:var(--indigo);color:#cfc9fb;}
+  .role-chip-empty{font-size:13px;color:var(--text-faint);}
+
+  /* Repeat interval */
+  .repeat-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;}
+  .repeat-unit{text-align:center;}
+  .repeat-unit .unit-label{font-size:10.5px;color:var(--text-faint);margin-top:5px;letter-spacing:.05em;text-transform:uppercase;}
+
+  #create-btn{width:100%;padding:13px;font-size:14.5px;margin-top:6px;}
+  #status-msg{text-align:center;font-size:12.5px;color:var(--text-dim);margin-top:10px;min-height:16px;}
+
+  /* Timeline */
+  .timeline{position:relative;padding-left:28px;}
+  .timeline::before{
+    content:'';position:absolute;left:7px;top:6px;bottom:6px;width:2px;
+    background:linear-gradient(180deg, var(--indigo) 0%, var(--border) 100%);
+  }
+  .tl-item{position:relative;padding-bottom:22px;}
+  .tl-item:last-child{padding-bottom:0;}
+  .tl-node{
+    position:absolute;left:-28px;top:4px;width:16px;height:16px;border-radius:50%;
+    background:var(--bg-card);border:2px solid var(--indigo);
+  }
+  .tl-item.paused .tl-node{border-color:var(--text-faint);}
+  .tl-node::after{
+    content:'';position:absolute;inset:3px;border-radius:50%;background:var(--indigo);
+  }
+  .tl-item.paused .tl-node::after{background:var(--text-faint);}
+
+  .tl-card{
+    background:var(--bg-elevated);border:1px solid var(--border-soft);
+    border-radius:11px;padding:16px 18px;
+  }
+  .tl-message{font-size:14.5px;font-weight:500;line-height:1.5;margin-bottom:10px;word-break:break-word;}
+  .tl-meta{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12px;color:var(--text-dim);margin-bottom:12px;}
+  .tl-meta .tl-time{color:var(--amber);font-family:'JetBrains Mono',monospace;font-weight:500;}
+  .tl-meta .sep{color:var(--text-faint);}
+  .badge{
+    display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:600;
+    padding:3px 9px;border-radius:999px;letter-spacing:.02em;
+  }
+  .badge.on{background:rgba(61,214,140,0.14);color:var(--green);}
+  .badge.off{background:rgba(139,141,152,0.14);color:var(--text-dim);}
+  .badge .dot{width:5px;height:5px;border-radius:50%;background:currentColor;}
+
+  .tl-actions{display:flex;gap:8px;}
+  .tl-actions button{
+    flex:1;border:none;border-radius:8px;padding:8px 10px;font-size:12px;font-weight:600;
+    cursor:pointer;font-family:inherit;transition:all .15s;
+  }
+  .act-toggle{background:rgba(108,92,231,0.14);color:var(--indigo-bright);}
+  .act-toggle:hover{background:rgba(108,92,231,0.24);}
+  .act-delete{background:rgba(229,72,77,0.1);color:#ff9b9e;}
+  .act-delete:hover{background:rgba(229,72,77,0.18);}
+
+  .empty-state{
+    text-align:center;padding:36px 20px;color:var(--text-faint);font-size:13.5px;
+  }
+
+  /* Footer Version Display */
+  footer.page-footer{
+    text-align:center;font-size:11.5px;color:var(--text-faint);
+    font-family:'JetBrains Mono',monospace;margin-top:40px;
+  }
+
+  /* Modal */
+  #custom-modal{
+    display:none;position:fixed;inset:0;background:rgba(10,10,12,0.7);
+    backdrop-filter:blur(3px);
+    align-items:center;justify-content:center;z-index:50;padding:20px;
+  }
+  #custom-modal.show{display:flex;}
+  .modal-box{
+    background:var(--bg-card);border:1px solid var(--border);
+    border-radius:16px;padding:24px;max-width:360px;width:100%;
+    box-shadow:0 20px 60px rgba(0,0,0,0.5);
+  }
+  .modal-box h3{margin:0 0 8px;font-size:16px;font-weight:700;}
+  .modal-box p{margin:0 0 20px;font-size:13.5px;color:var(--text-dim);line-height:1.5;}
+  .modal-actions{display:flex;justify-content:flex-end;gap:8px;}
+  .modal-actions button{padding:9px 16px;font-size:13px;}
+  .btn-ghost{background:var(--bg-elevated);color:var(--text-dim);}
+  .btn-ghost:hover{background:var(--border);}
+
+  ::selection{background:var(--indigo-dim);}
+
+  @media(min-width:520px){
+    .field-row{grid-template-columns:1fr 1fr;}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="brand">
+      <div class="brand-mark">
+        <svg viewBox="0 0 24 24" fill="none"><path d="M12 6v6l4 2" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="12" cy="12" r="9" stroke="#fff" stroke-width="2"/></svg>
+      </div>
+      <div>
+        <div class="title-row">
+          <h1 class="display">Scrim Scheduler</h1>
+          <span class="version-badge">v1.2</span>
+        </div>
+        <p id="user-status"><span class="dot"></span>로그인 상태 확인 중...</p>
+      </div>
+    </div>
+    <button id="login-btn" class="btn btn-primary">Discord 로그인</button>
+  </header>
+
+  <div id="custom-modal">
+    <div class="modal-box">
+      <h3 id="modal-title">알림</h3>
+      <p id="modal-message"></p>
+      <div class="modal-actions">
+        <button id="modal-cancel" class="btn btn-ghost" style="display:none;">취소</button>
+        <button id="modal-confirm" class="btn btn-primary">확인</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Create -->
+  <section class="card">
+    <div class="card-head">
+      <span class="card-eyebrow">New</span>
+      <h2 class="display">예약 만들기</h2>
+    </div>
+
+    <div class="field-row">
+      <div class="field">
+        <label>관리 서버</label>
+        <select id="guild-select"><option value="">로그인 후 서버 목록이 표시됩니다</option></select>
+      </div>
+      <div class="field">
+        <label>전송 채널</label>
+        <select id="channel-select"><option value="">서버를 먼저 선택하세요</option></select>
+      </div>
+    </div>
+
+    <div class="field">
+      <div class="field-head">
+        <label>메시지 내용</label>
+        <span id="char-count" class="char-count">0 / 2000</span>
+      </div>
+      <textarea id="message-input" maxlength="2000" rows="4" placeholder="보낼 메시지를 입력하세요"></textarea>
+    </div>
+
+    <div class="field">
+      <label>역할 멘션 (선택)</label>
+      <div id="role-chip-list"><span class="role-chip-empty">서버를 선택하면 역할 목록이 표시됩니다</span></div>
+    </div>
+
+    <div class="field">
+      <label>시작 날짜 및 시간 (KST 기준)</label>
+      <input id="start-at-input" type="datetime-local">
+    </div>
+
+    <div class="field">
+      <label>반복 간격</label>
+      <div class="repeat-grid">
+        <div class="repeat-unit"><input id="months-input" type="number" min="0" value="0"><div class="unit-label">Months</div></div>
+        <div class="repeat-unit"><input id="days-input" type="number" min="0" value="1"><div class="unit-label">Days</div></div>
+        <div class="repeat-unit"><input id="hours-input" type="number" min="0" value="0"><div class="unit-label">Hours</div></div>
+        <div class="repeat-unit"><input id="minutes-input" type="number" min="0" value="0"><div class="unit-label">Minutes</div></div>
+      </div>
+    </div>
+
+    <button id="create-btn" class="btn btn-primary">예약 생성하기</button>
+    <p id="status-msg"></p>
+  </section>
+
+  <!-- List -->
+  <section class="card">
+    <div class="card-head">
+      <span class="card-eyebrow">Timeline</span>
+      <h2 class="display">예약 목록</h2>
+    </div>
+    <div id="schedules-list"><p class="empty-state">로그인 후 예약을 확인하세요.</p></div>
+  </section>
+
+  <footer class="page-footer">
+    Scrim Scheduler Dashboard v1.1.1 (Stable Session)
+  </footer>
+
+</div>
+
+<script>
+  const API_BASE = "https://discord-bot.pubgmk14-kr.workers.dev";
+  let selectedRoleIds = new Set();
+  let currentRoles = [];
+
+  // 안정적인 세션 토큰 관리 (새로고침 시 풀림 현상 원천 차단)
+  function initToken() {
+    const urlParams = new URLSearchParams(location.search);
+    const urlSession = urlParams.get("session");
+    if (urlSession) {
+      localStorage.setItem("session", urlSession);
+      window.history.replaceState({}, document.title, location.pathname);
+      return urlSession;
+    }
+    return localStorage.getItem("session");
+  }
+
+  let token = initToken();
+
+  const showModal = (title, message, onConfirm, showCancel = false) => {
+    document.getElementById('modal-title').textContent = title;
+    document.getElementById('modal-message').textContent = message;
+    const cancelBtn = document.getElementById('modal-cancel');
+    const confirmBtn = document.getElementById('modal-confirm');
+    cancelBtn.style.display = showCancel ? 'inline-block' : 'none';
+
+    const modal = document.getElementById('custom-modal');
+    modal.classList.add('show');
+
+    const newConfirm = confirmBtn.cloneNode(true);
+    confirmBtn.parentNode.replaceChild(newConfirm, confirmBtn);
+    const newCancel = cancelBtn.cloneNode(true);
+    cancelBtn.parentNode.replaceChild(newCancel, cancelBtn);
+
+    newConfirm.onclick = () => { modal.classList.remove('show'); if (onConfirm) onConfirm(); };
+    newCancel.onclick = () => modal.classList.remove('show');
+  };
+
+  async function api(path, options = {}) {
+    const headers = { ...(options.headers || {}), Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
+    const res = await fetch(`${API_BASE}${path}`, { ...options, headers });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    return data;
+  }
+
+  async function init() {
+    if (!token) {
+      document.getElementById('user-status').textContent = "로그인하지 않았습니다.";
+      return;
+    }
+    try {
+      const me = await api("/api/me");
+      const statusEl = document.getElementById('user-status');
+      statusEl.innerHTML = `<span class="dot"></span>${escapeHtml(me.username)}`;
+      statusEl.classList.add('online');
+
+      const loginBtn = document.getElementById('login-btn');
+      loginBtn.textContent = "로그아웃";
+      loginBtn.className = "btn btn-danger";
+      loginBtn.onclick = () => { 
+        localStorage.removeItem("session"); 
+        token = null;
+        location.href = location.pathname; 
+      };
+
+      const guilds = await api("/api/guilds");
+      const guildSelect = document.getElementById('guild-select');
+      guildSelect.innerHTML = guilds.map(g => `<option value="${g.id}">${escapeHtml(g.name)}</option>`).join("");
+
+      await loadChannels();
+      await loadRoles();
+      await loadSchedules();
+    } catch (e) {
+      // 서버에서 유효하지 않은 세션이라고 판단했을 때만 안전하게 로그아웃 처리
+      document.getElementById('user-status').textContent = "세션이 만료되었습니다.";
+      localStorage.removeItem("session");
+      token = null;
+    }
+  }
+
+  document.getElementById('login-btn').onclick = () => {
+    if (token) return;
+    location.href = `${API_BASE}/api/login`;
+  };
+
+  document.getElementById('guild-select').onchange = () => { loadChannels(); loadRoles(); };
+
+  async function loadChannels() {
+    const guildId = document.getElementById('guild-select').value;
+    if (!guildId) return;
+    try {
+      const channels = await api(`/api/guilds/${guildId}/channels`);
+      document.getElementById('channel-select').innerHTML = channels.map(c => `<option value="${c.id}"># ${escapeHtml(c.name)}</option>`).join("");
+    } catch (e) {
+      document.getElementById('channel-select').innerHTML = `<option value="">채널 로드 실패 (봇 권한 확인)</option>`;
+    }
+  }
+
+  async function loadRoles() {
+    const guildId = document.getElementById('guild-select').value;
+    const list = document.getElementById('role-chip-list');
+    selectedRoleIds = new Set();
+    if (!guildId) { list.innerHTML = '<span class="role-chip-empty">서버를 선택하면 역할 목록이 표시됩니다</span>'; return; }
+
+    try {
+      currentRoles = await api(`/api/guilds/${guildId}/roles`);
+      if (!currentRoles.length) {
+        list.innerHTML = '<span class="role-chip-empty">멘션 가능한 역할이 없습니다</span>';
+        return;
+      }
+      list.innerHTML = currentRoles.map(r => `
+        <button type="button" class="role-chip" data-role-id="${r.id}">
+          <span class="swatch" style="${r.color ? `background:${r.color}` : ''}"></span>
+          ${escapeHtml(r.name)}
+        </button>
+      `).join("");
+
+      list.querySelectorAll('.role-chip').forEach(chip => {
+        chip.onclick = () => {
+          const id = chip.dataset.roleId;
+          if (selectedRoleIds.has(id)) { selectedRoleIds.delete(id); chip.classList.remove('selected'); }
+          else { selectedRoleIds.add(id); chip.classList.add('selected'); }
+        };
+      });
+    } catch (e) {
+      list.innerHTML = '<span class="role-chip-empty">역할 로드 실패 (봇 권한 확인)</span>';
+    }
+  }
+
+  document.getElementById('message-input').oninput = (e) => {
+    document.getElementById('char-count').textContent = `${e.target.value.length} / 2000`;
+  };
+
+  document.getElementById('create-btn').onclick = async () => {
+    if (!token) { showModal('로그인 필요', '예약을 생성하려면 먼저 로그인이 필요합니다.'); return; }
+    const statusMsg = document.getElementById('status-msg');
+    try {
+      statusMsg.textContent = "저장 중...";
+      
+      const rawDate = document.getElementById('start-at-input').value;
+      if (!rawDate) throw new Error("시작 날짜와 시간을 선택해주세요.");
+      
+      const kstDate = new Date(rawDate + "+09:00");
+
+      await api("/api/schedules", {
+        method: "POST",
+        body: JSON.stringify({
+          guildId: document.getElementById('guild-select').value,
+          channelId: document.getElementById('channel-select').value,
+          message: document.getElementById('message-input').value,
+          roleIds: Array.from(selectedRoleIds),
+          startAt: kstDate.toISOString(),
+          timezone: "Asia/Seoul",
+          months: Number(document.getElementById('months-input').value || 0),
+          days: Number(document.getElementById('days-input').value || 1),
+          hours: Number(document.getElementById('hours-input').value || 0),
+          minutes: Number(document.getElementById('minutes-input').value || 0)
+        })
+      });
+      statusMsg.textContent = "예약이 생성되었습니다.";
+      document.getElementById('message-input').value = "";
+      document.getElementById('char-count').textContent = "0 / 2000";
+      document.querySelectorAll('.role-chip.selected').forEach(c => c.classList.remove('selected'));
+      selectedRoleIds = new Set();
+      await loadSchedules();
+    } catch (e) {
+      statusMsg.textContent = e.message;
+    }
+  };
+
+  function roleNamesFor(idString) {
+    if (!idString) return [];
+    const ids = idString.split(",");
+    return ids.map(id => {
+      const r = currentRoles.find(r => r.id === id);
+      return r ? r.name : null;
+    }).filter(Boolean);
+  }
+
+  function formatKstTime(utcIsoString) {
+    try {
+      const d = new Date(utcIsoString);
+      return d.toLocaleString("ko-KR", {
+        timeZone: "Asia/Seoul",
+        year: "numeric",
+        month: "long",
+        day: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: true
+      });
+    } catch (e) {
+      return utcIsoString;
+    }
+  }
+
+  async function loadSchedules() {
+    const schedules = await api("/api/schedules");
+    const container = document.getElementById('schedules-list');
+
+    if (!schedules.length) {
+      container.innerHTML = '<p class="empty-state">등록된 예약이 없습니다. 위에서 첫 예약을 만들어보세요.</p>';
+      return;
+    }
+
+    container.innerHTML = `<div class="timeline">` + schedules.map(s => {
+      const enabled = Number(s.enabled);
+      const roleNames = roleNamesFor(s.role_id);
+      const formattedTime = formatKstTime(s.next_run_at);
+      return `
+      <div class="tl-item ${enabled ? '' : 'paused'}">
+        <div class="tl-node"></div>
+        <div class="tl-card">
+          <div class="tl-message">${escapeHtml(s.message)}</div>
+          <div class="tl-meta">
+            <span class="badge ${enabled ? 'on' : 'off'}"><span class="dot"></span>${enabled ? '활성화' : '일시중지'}</span>
+            <span class="tl-time">${escapeHtml(formattedTime)}</span>
+            <span class="sep">·</span>
+            <span>${s.months}M ${s.days}D ${s.hours}H ${s.minutes}Min 반복</span>
+            ${roleNames.length ? `<span class="sep">·</span><span>${roleNames.map(escapeHtml).join(', ')}</span>` : ''}
+          </div>
+          <div class="tl-actions">
+            <button class="act-toggle" onclick="toggleSchedule('${s.id}')">${enabled ? '일시중지' : '재개'}</button>
+            <button class="act-delete" onclick="deleteSchedule('${s.id}')">삭제</button>
+          </div>
+        </div>
+      </div>`;
+    }).join('') + `</div>`;
+  }
+
+  window.toggleSchedule = async id => { await api(`/api/schedules/${id}/toggle`, { method: "POST" }); await loadSchedules(); };
+  window.deleteSchedule = async id => {
+    showModal('예약 삭제', '이 예약을 정말로 삭제하시겠습니까?', async () => {
+      await api(`/api/schedules/${id}`, { method: "DELETE" });
+      await loadSchedules();
+    }, true);
+  };
+
+  function escapeHtml(value) {
+    return String(value).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;').replaceAll("'",'&#039;');
+  }
+
+  init();
+</script>
+</body>
+</html>
