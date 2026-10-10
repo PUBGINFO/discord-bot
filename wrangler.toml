@@ -14,4 +14,4 @@ bindings = [
 
 [[migrations]]
 tag = "v1"
-new_classes = ["PrecisionSchedulerDO"]
+new_sqlite_classes = ["PrecisionSchedulerDO"]
