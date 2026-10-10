@@ -16,6 +16,11 @@ bindings = [
 tag = "v1"
 new_sqlite_classes = ["PrecisionSchedulerDO"]
 
+[observability]
+enabled = true
+head_sampling_rate = 1
+redact_query_string = false
+
 [observability.logs]
 enabled = true
 head_sampling_rate = 1
@@ -27,5 +32,5 @@ enabled = false
 head_sampling_rate = 1
 persist = true
 
-[observability.issue_detection]
-enabled = true
+[observability.issues]
+enabled = false
