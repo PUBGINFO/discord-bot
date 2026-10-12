@@ -19,6 +19,14 @@ const FIXED_GUILD_ID = "1413099667667026063";
 const BAIYA_ROLE_ID = "1541955349735538698";
 const BAIYA_ROLE_NAME = "白夜";
 
+/* /역할지급 에서 사용할 Google Sheets (웹사이트 ROLE 페이지의 SHEET_URL 과 동일)
+   env.ROLE_SHEET_URL 을 설정하면 그 값이 우선합니다. */
+const ROLE_SHEET_URL_DEFAULT =
+  "https://docs.google.com/spreadsheets/d/11WaBONeC1UQMymXvlc277y9-Cv36YWddW_BMkX2F0dg";
+
+/* /역할지급 확인 버튼 유효 시간 (초) */
+const ROLE_REQUEST_TTL_SEC = 600;
+
 /* =========================================================
    JSON / 유틸
 ========================================================= */
@@ -155,6 +163,11 @@ async function registerCommands(env) {
           max_value: 100
         }
       ]
+    },
+    {
+      name: "역할지급",
+      description:
+        "구글 시트 기준으로 白夜 역할 지급 대상을 확인하고, 확인 후 지급합니다."
     }
   ];
 
@@ -735,120 +748,72 @@ function parseCsv(text) {
    Google Sheets B4:C21
 ========================================================= */
 
-async function getRoleSheet(request, env) {
-  const url =
-    new URL(request.url);
-
-  const sourceUrl =
-    url.searchParams.get("url");
-
+/* 시트 B4:C21 → [{ seed, nickname }]  (웹사이트 / 슬래시 명령어 공용) */
+async function fetchRoleSheetRows(sourceUrl) {
   if (!sourceUrl) {
-    return json(
-      {
-        error:
-          "Google Sheets URL이 없습니다."
-      },
-      400
-    );
+    return { ok: false, status: 400, error: "Google Sheets URL이 없습니다." };
   }
 
   let source;
 
   try {
-    source =
-      new URL(sourceUrl);
+    source = new URL(sourceUrl);
   } catch {
-    return json(
-      {
-        error:
-          "잘못된 Google Sheets URL입니다."
-      },
-      400
-    );
+    return { ok: false, status: 400, error: "잘못된 Google Sheets URL입니다." };
   }
 
-  if (
-    source.hostname !==
-    "docs.google.com"
-  ) {
-    return json(
-      {
-        error:
-          "Google Sheets 주소만 사용할 수 있습니다."
-      },
-      400
-    );
+  if (source.hostname !== "docs.google.com") {
+    return { ok: false, status: 400, error: "Google Sheets 주소만 사용할 수 있습니다." };
   }
 
-  const match =
-    source.pathname.match(
-      /^\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/
-    );
+  const match = source.pathname.match(/^\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/);
 
   if (!match) {
-    return json(
-      {
-        error:
-          "Google Spreadsheet ID를 찾을 수 없습니다."
-      },
-      400
-    );
+    return { ok: false, status: 400, error: "Google Spreadsheet ID를 찾을 수 없습니다." };
   }
 
   const csvUrl =
     `https://docs.google.com/spreadsheets/d/${match[1]}/export?format=csv`;
 
-  const response =
-    await fetch(csvUrl);
+  let response;
 
-  if (!response.ok) {
-    return json(
-      {
-        error:
-          `Google Sheets 요청 실패 (${response.status})`
-      },
-      502
-    );
+  try {
+    response = await fetch(csvUrl);
+  } catch (e) {
+    return { ok: false, status: 502, error: `Google Sheets 요청 실패 (${e.message})` };
   }
 
-  const rows =
-    parseCsv(
-      await response.text()
-    );
+  if (!response.ok) {
+    return { ok: false, status: 502, error: `Google Sheets 요청 실패 (${response.status})` };
+  }
 
+  const rows = parseCsv(await response.text());
   const result = [];
 
-  for (
-    let i = 3;
-    i <= 20;
-    i++
-  ) {
-    const row =
-      rows[i] || [];
-
-    const seed =
-      String(
-        row[1] ?? ""
-      ).trim();
-
-    const nickname =
-      String(
-        row[2] ?? ""
-      ).trim();
+  for (let i = 3; i <= 20; i++) {
+    const row = rows[i] || [];
+    const seed = String(row[1] ?? "").trim();
+    const nickname = String(row[2] ?? "").trim();
 
     if (!nickname) {
       continue;
     }
 
-    result.push({
-      seed,
-      nickname
-    });
+    result.push({ seed, nickname });
   }
 
-  return json({
-    rows: result
-  });
+  return { ok: true, rows: result };
+}
+
+async function getRoleSheet(request, env) {
+  const url = new URL(request.url);
+  const result = await fetchRoleSheetRows(url.searchParams.get("url"));
+
+  if (!result.ok) {
+    return json({ error: result.error }, result.status);
+  }
+
+  return json({ rows: result.rows });
 }
 
 /* =========================================================
@@ -1134,24 +1099,12 @@ async function checkFixedGuildPermissionCached(session, env) {
   return value;
 }
 
-async function findRoleMembers(request, env, session) {
-  const permission = await checkFixedGuildPermissionCached(session, env);
-  if (!permission.ok) return json({ error: permission.error }, 403);
-
-  const url = new URL(request.url);
-
-  // nickname=홍길동 (단건) / nicknames=홍길동\n김철수 (여러 명, 줄바꿈 구분)
-  const wanted = [...new Set([
-    ...url.searchParams.getAll("nickname"),
-    ...url.searchParams.getAll("nicknames").join("\n").split("\n")
-  ].map(s => s.trim()).filter(Boolean))];
-
-  if (wanted.length === 0) return json({ error: "nickname이 없습니다." }, 400);
-
-  const force = url.searchParams.get("refresh") === "1";
+/* 닉네임 목록 → 서버 멤버 매칭 (멤버 목록 캐시 사용). 웹 API / 슬래시 명령어 공용 */
+async function resolveNicknameMatches(env, wanted, force = false) {
   const result = await getAllGuildMembers(env, force);
+
   if (!result.ok) {
-    return json({ error: `Discord 멤버 목록 조회 실패: ${result.error}` }, result.status || 500);
+    return { ok: false, status: result.status || 500, error: result.error };
   }
 
   const wantedSet = new Set(wanted);
@@ -1172,7 +1125,34 @@ async function findRoleMembers(request, env, session) {
     }
   }
 
-  return json({ members: matches, byNickname });
+  return { ok: true, matches, byNickname };
+}
+
+async function findRoleMembers(request, env, session) {
+  const permission = await checkFixedGuildPermissionCached(session, env);
+  if (!permission.ok) return json({ error: permission.error }, 403);
+
+  const url = new URL(request.url);
+
+  // nickname=홍길동 (단건) / nicknames=홍길동\n김철수 (여러 명, 줄바꿈 구분)
+  const wanted = [...new Set([
+    ...url.searchParams.getAll("nickname"),
+    ...url.searchParams.getAll("nicknames").join("\n").split("\n")
+  ].map(s => s.trim()).filter(Boolean))];
+
+  if (wanted.length === 0) return json({ error: "nickname이 없습니다." }, 400);
+
+  const force = url.searchParams.get("refresh") === "1";
+  const resolved = await resolveNicknameMatches(env, wanted, force);
+
+  if (!resolved.ok) {
+    return json(
+      { error: `Discord 멤버 목록 조회 실패: ${resolved.error}` },
+      resolved.status || 500
+    );
+  }
+
+  return json({ members: resolved.matches, byNickname: resolved.byNickname });
 }
 
 /* =========================================================
@@ -1209,22 +1189,38 @@ async function processSelectedBaiyaRoles(
     return json({ error: "한 번에 최대 100명까지 처리할 수 있습니다." }, 400);
   }
 
+  const outcome = await applyBaiyaRoleToUsers(env, userIds, action);
+
+  if (!outcome.ok) {
+    return json({ error: outcome.error }, outcome.status);
+  }
+
+  // 기존 프론트엔드 결과 포맷 100% 동일 응답
+  return json(outcome);
+}
+
+/* =========================================================
+   白夜 역할 지급/제거 코어 (웹 API / 슬래시 명령어 공용)
+   - 반환: { ok:false, status, error } 또는 { ok:true, action, role, total, success, already, failed, failedMembers }
+========================================================= */
+
+async function applyBaiyaRoleToUsers(env, userIds, action) {
   const roleInfo = await getBaiyaRole(env);
   if (!roleInfo.ok) {
     if (roleInfo.rateLimited) {
-      return json({ error: "Discord API 요청 제한에 걸렸습니다. 잠시 후 다시 시도해주세요." }, 429);
+      return { ok: false, status: 429, error: "Discord API 요청 제한에 걸렸습니다. 잠시 후 다시 시도해주세요." };
     }
-    return json({ error: roleInfo.error }, 500);
+    return { ok: false, status: 500, error: roleInfo.error };
   }
 
   const hierarchy = await checkBotRoleHierarchy(env, roleInfo.roles);
   if (!hierarchy.ok) {
-    return json({ error: hierarchy.error }, 403);
+    return { ok: false, status: 403, error: hierarchy.error };
   }
 
   const role = roleInfo.role;
   if (Number(role.position) >= hierarchy.highest) {
-    return json({ error: "白夜 역할이 Bot의 최고 역할보다 높거나 같아서 관리할 수 없습니다." }, 403);
+    return { ok: false, status: 403, error: "白夜 역할이 Bot의 최고 역할보다 높거나 같아서 관리할 수 없습니다." };
   }
 
   // ---------------------------------------------------------
@@ -1323,8 +1319,7 @@ async function processSelectedBaiyaRoles(
     }
   }
 
-  // 기존 프론트엔드 결과 포맷 100% 동일 응답
-  return json({
+  return {
     ok: true,
     action,
     role: {
@@ -1336,7 +1331,7 @@ async function processSelectedBaiyaRoles(
     already,
     failed,
     failedMembers
-  });
+  };
 }
 
 /* =========================================================
@@ -2472,6 +2467,445 @@ export class PrecisionSchedulerDO {
 }
 
 /* =========================================================
+   /역할지급  (Google Sheets 기반 白夜 역할 지급 + 확인/취소 버튼)
+========================================================= */
+
+let ROLE_REQUEST_TABLE_READY = false;
+
+/* 요청 상태 저장 테이블 (중복 실행 / 재실행 방지용). 최초 1회 자동 생성 */
+async function ensureRoleRequestTable(env) {
+  if (ROLE_REQUEST_TABLE_READY) return;
+
+  await env.DB.prepare(`
+    CREATE TABLE IF NOT EXISTS role_requests (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      user_ids TEXT NOT NULL,
+      meta TEXT,
+      created_at INTEGER NOT NULL
+    )
+  `).run();
+
+  ROLE_REQUEST_TABLE_READY = true;
+}
+
+/* 명령어/버튼 사용 권한: 고정 서버 + (관리자 | 서버 관리 | 역할 관리)
+   웹사이트(checkFixedGuildPermission)와 동일한 기준 */
+function checkRoleGrantInteractionPermission(interaction) {
+  if (interaction.guild_id !== FIXED_GUILD_ID) {
+    return {
+      ok: false,
+      error: "❌ 이 명령어는 지정된 서버에서만 사용할 수 있습니다."
+    };
+  }
+
+  try {
+    const n = BigInt(interaction.member?.permissions || "0");
+
+    const allowed =
+      (n & 0x8n) !== 0n ||
+      (n & 0x20n) !== 0n ||
+      (n & 0x10000000n) !== 0n;
+
+    if (!allowed) {
+      return {
+        ok: false,
+        error: "❌ 이 명령어를 사용하려면 서버 관리 또는 역할 관리 권한이 필요합니다."
+      };
+    }
+  } catch {
+    return { ok: false, error: "❌ 권한을 확인할 수 없습니다." };
+  }
+
+  return { ok: true };
+}
+
+/* 원본(ephemeral) 메시지 수정 – content + components 지원 */
+async function editOriginalInteractionMessage(interaction, env, payload) {
+  const applicationId =
+    interaction.application_id ||
+    env.DISCORD_APPLICATION_ID ||
+    env.DISCORD_CLIENT_ID;
+
+  if (!applicationId || !interaction.token) {
+    return false;
+  }
+
+  try {
+    const res = await fetch(
+      `${DISCORD_API}/webhooks/${applicationId}/${interaction.token}/messages/@original`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          allowed_mentions: { parse: [] },
+          ...payload
+        })
+      }
+    );
+
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+function roleGrantButtons(requestId, disabled = false) {
+  return [
+    {
+      type: 1,
+      components: [
+        {
+          type: 2,
+          style: 3,
+          label: "확인",
+          custom_id: `rolegrant:confirm:${requestId}`,
+          disabled
+        },
+        {
+          type: 2,
+          style: 4,
+          label: "취소",
+          custom_id: `rolegrant:cancel:${requestId}`,
+          disabled
+        }
+      ]
+    }
+  ];
+}
+
+function clipDiscordText(text, max = 1900) {
+  return text.length > max
+    ? text.slice(0, max - 20) + "\n…(이하 생략)"
+    : text;
+}
+
+function roleRowLabel(r) {
+  return r.seed ? `[${r.seed}] ${r.nickname}` : r.nickname;
+}
+
+/* /역할지급 실행: 시트 조회 → 서버 멤버 매칭 → 미리보기 + 확인/취소 버튼
+   (type 5 ephemeral 지연 응답 이후 waitUntil 에서 실행) */
+async function handleRoleGrantCommand(interaction, env) {
+  const userId = interaction.member?.user?.id;
+
+  const fail = text =>
+    editOriginalInteractionMessage(interaction, env, {
+      content: text,
+      components: []
+    });
+
+  try {
+    await ensureRoleRequestTable(env);
+
+    // 1) Google Sheets 조회 (웹사이트와 동일 로직)
+    const sheet = await fetchRoleSheetRows(
+      env.ROLE_SHEET_URL || ROLE_SHEET_URL_DEFAULT
+    );
+
+    if (!sheet.ok) {
+      await fail(`❌ Google Sheets 조회 실패\n${sheet.error}`);
+      return;
+    }
+
+    const rows = sheet.rows;
+
+    if (!rows.length) {
+      await fail("⚠️ 시트에서 가져온 닉네임이 없습니다. (B4:C21 확인)");
+      return;
+    }
+
+    // 2) 서버 멤버 매칭 (캐시 공용, 미리보기는 최신 목록으로 갱신)
+    const names = [...new Set(rows.map(r => r.nickname))];
+    const resolved = await resolveNicknameMatches(env, names, true);
+
+    if (!resolved.ok) {
+      await fail(`❌ Discord 멤버 조회 실패\n${resolved.error}`);
+      return;
+    }
+
+    const targets = [];
+    const missing = [];
+    const ambiguous = [];
+
+    for (const row of rows) {
+      const list = resolved.byNickname[row.nickname] || [];
+
+      if (list.length === 0) {
+        missing.push(row);
+      } else if (list.length > 1) {
+        ambiguous.push({ row, count: list.length });
+      } else {
+        const m = list[0];
+        targets.push({
+          seed: row.seed,
+          nickname: row.nickname,
+          id: m.id,
+          hasRole: m.roles.includes(BAIYA_ROLE_ID)
+        });
+      }
+    }
+
+    const userIds = [...new Set(targets.map(t => t.id))];
+    const alreadyIds = new Set(targets.filter(t => t.hasRole).map(t => t.id));
+
+    // 3) 미리보기 메시지
+    const lines = [
+      `🎯 **${BAIYA_ROLE_NAME}** 역할 지급 대상 확인`,
+      `시트 대상 ${rows.length}개 · 확인된 멤버 **${userIds.length}명**`,
+      `신규 지급 예정 **${userIds.length - alreadyIds.size}명** · 이미 보유 **${alreadyIds.size}명**`
+    ];
+
+    if (targets.length) {
+      lines.push("", "✅ **확인된 대상**");
+      for (const t of targets) {
+        lines.push(`• ${roleRowLabel(t)}${t.hasRole ? " (이미 보유)" : ""}`);
+      }
+    }
+
+    if (missing.length) {
+      lines.push("", `⚠️ **확인할 수 없는 팀/닉네임 (${missing.length})**`);
+      for (const r of missing) {
+        lines.push(`• ${roleRowLabel(r)}`);
+      }
+    }
+
+    if (ambiguous.length) {
+      lines.push("", `🔁 **중복 닉네임 – 안전을 위해 제외 (${ambiguous.length})**`);
+      for (const a of ambiguous) {
+        lines.push(`• ${roleRowLabel(a.row)} (${a.count}명 일치)`);
+      }
+    }
+
+    if (!userIds.length) {
+      lines.push("", "지급할 수 있는 대상이 없습니다.");
+      await fail(clipDiscordText(lines.join("\n")));
+      return;
+    }
+
+    lines.push("", "아래 **확인**을 눌러야 실제로 지급됩니다. (10분 안에 선택해주세요)");
+
+    // 4) 요청 저장 (확인 시 미리보기와 동일한 대상에게만 지급)
+    const requestId = crypto.randomUUID();
+
+    await env.DB.prepare(`DELETE FROM role_requests WHERE created_at < ?`)
+      .bind(nowSec() - 86400)
+      .run();
+
+    await env.DB.prepare(`
+      INSERT INTO role_requests (id, user_id, status, user_ids, meta, created_at)
+      VALUES (?, ?, 'pending', ?, ?, ?)
+    `)
+      .bind(
+        requestId,
+        userId,
+        JSON.stringify(userIds),
+        JSON.stringify({
+          missing: missing.map(roleRowLabel),
+          ambiguous: ambiguous.map(a => roleRowLabel(a.row))
+        }),
+        nowSec()
+      )
+      .run();
+
+    await editOriginalInteractionMessage(interaction, env, {
+      content: clipDiscordText(lines.join("\n")),
+      components: roleGrantButtons(requestId)
+    });
+  } catch (e) {
+    await fail(`❌ 처리 중 오류가 발생했습니다.\n${e.message}`);
+  }
+}
+
+/* 확인 버튼 이후 실제 지급 (waitUntil 에서 실행) */
+async function runRoleGrant(interaction, env, requestId, userIds, meta) {
+  let content;
+  let status = "done";
+
+  try {
+    const outcome = await applyBaiyaRoleToUsers(env, userIds, "assign");
+
+    if (!outcome.ok) {
+      status = "failed";
+      content = `❌ 역할 지급 실패\n${outcome.error}`;
+    } else {
+      const lines = [
+        `✅ **${BAIYA_ROLE_NAME}** 역할 지급 완료`,
+        "",
+        `대상 멤버: ${outcome.total}명`,
+        `새로 지급: ${outcome.success}명`,
+        `이미 보유: ${outcome.already}명`,
+        `실패: ${outcome.failed}명`
+      ];
+
+      if (outcome.failedMembers.length) {
+        lines.push("", "❌ **실패 멤버**");
+        for (const f of outcome.failedMembers.slice(0, 10)) {
+          lines.push(`• <@${f.userId}> – ${f.error}`);
+        }
+      }
+
+      if (meta?.missing?.length) {
+        lines.push("", `⚠️ 확인할 수 없어 제외된 팀/닉네임 (${meta.missing.length})`);
+        for (const n of meta.missing) lines.push(`• ${n}`);
+      }
+
+      if (meta?.ambiguous?.length) {
+        lines.push("", `🔁 중복 닉네임으로 제외 (${meta.ambiguous.length})`);
+        for (const n of meta.ambiguous) lines.push(`• ${n}`);
+      }
+
+      content = lines.join("\n");
+    }
+  } catch (e) {
+    status = "failed";
+    content = `❌ 처리 중 오류가 발생했습니다.\n${e.message}`;
+  }
+
+  try {
+    await env.DB.prepare(`UPDATE role_requests SET status = ? WHERE id = ?`)
+      .bind(status, requestId)
+      .run();
+  } catch {}
+
+  await editOriginalInteractionMessage(interaction, env, {
+    content: clipDiscordText(content),
+    components: []
+  });
+}
+
+/* 확인 / 취소 버튼 (Message Component, interaction.type === 3) */
+async function handleRoleGrantComponent(interaction, env, ctx) {
+  try {
+    const [, action, requestId] = String(interaction.data?.custom_id || "").split(":");
+    const clickerId = interaction.member?.user?.id;
+
+    if (!requestId || (action !== "confirm" && action !== "cancel")) {
+      return interactionResponse("❌ 잘못된 요청입니다.");
+    }
+
+    await ensureRoleRequestTable(env);
+
+    const row = await env.DB.prepare(`
+      SELECT id, user_id, status, user_ids, meta, created_at
+      FROM role_requests
+      WHERE id = ?
+    `)
+      .bind(requestId)
+      .first();
+
+    if (!row) {
+      return interactionResponse(
+        "❌ 만료되었거나 존재하지 않는 요청입니다. /역할지급을 다시 실행해주세요."
+      );
+    }
+
+    // 최초 명령어 실행자만 조작 가능
+    if (row.user_id !== clickerId) {
+      return interactionResponse(
+        "❌ 이 요청을 실행한 사용자만 버튼을 사용할 수 있습니다."
+      );
+    }
+
+    // 권한 재검사 (명령어 실행 후 권한이 바뀐 경우 대비)
+    const gate = checkRoleGrantInteractionPermission(interaction);
+    if (!gate.ok) {
+      return interactionResponse(gate.error);
+    }
+
+    // 이미 취소/처리된 요청은 재실행 불가
+    if (row.status !== "pending") {
+      const label = {
+        processing: "처리 중",
+        done: "처리 완료",
+        failed: "처리 실패",
+        cancelled: "취소됨",
+        expired: "만료됨"
+      }[row.status] || row.status;
+
+      return interactionResponse(`ℹ️ 이미 처리된 요청입니다. (상태: ${label})`);
+    }
+
+    // 만료
+    if (nowSec() - Number(row.created_at) > ROLE_REQUEST_TTL_SEC) {
+      await env.DB.prepare(`
+        UPDATE role_requests SET status = 'expired'
+        WHERE id = ? AND status = 'pending'
+      `)
+        .bind(requestId)
+        .run();
+
+      return json({
+        type: 7,
+        data: {
+          content: "⏱️ 요청이 만료되었습니다. /역할지급을 다시 실행해주세요.",
+          components: []
+        }
+      });
+    }
+
+    /* ---------- 취소 ---------- */
+
+    if (action === "cancel") {
+      const r = await env.DB.prepare(`
+        UPDATE role_requests SET status = 'cancelled'
+        WHERE id = ? AND status = 'pending'
+      `)
+        .bind(requestId)
+        .run();
+
+      if (!r?.meta?.changes) {
+        return interactionResponse("ℹ️ 이미 처리된 요청입니다.");
+      }
+
+      return json({
+        type: 7,
+        data: {
+          content: "🚫 취소되었습니다. 아무 역할도 지급되지 않았습니다.",
+          components: []
+        }
+      });
+    }
+
+    /* ---------- 확인 ---------- */
+
+    // pending → processing 을 원자적으로 선점 (더블 클릭/동시 클릭 방지)
+    const claim = await env.DB.prepare(`
+      UPDATE role_requests SET status = 'processing'
+      WHERE id = ? AND status = 'pending'
+    `)
+      .bind(requestId)
+      .run();
+
+    if (!claim?.meta?.changes) {
+      return interactionResponse("ℹ️ 이미 처리 중이거나 완료된 요청입니다.");
+    }
+
+    let userIds = [];
+    let meta = {};
+
+    try {
+      userIds = JSON.parse(row.user_ids);
+      meta = JSON.parse(row.meta || "{}");
+    } catch {}
+
+    ctx.waitUntil(runRoleGrant(interaction, env, requestId, userIds, meta));
+
+    // 3초 제한 안에 즉시 응답: 버튼 비활성화 + 처리 중 표시
+    return json({
+      type: 7,
+      data: {
+        content: `⏳ 역할 지급 처리 중... (${userIds.length}명)`,
+        components: roleGrantButtons(requestId, true)
+      }
+    });
+  } catch (e) {
+    return interactionResponse(`❌ 처리 중 오류가 발생했습니다.\n${e.message}`);
+  }
+}
+
+/* =========================================================
    Worker Main Export
 ========================================================= */
 
@@ -2542,7 +2976,7 @@ export default {
 
         if (result.ok) {
           return new Response(
-            "✅ /채팅삭제 및 /채팅삭제플러스 명령어가 디스코드에 성공적으로 등록되었습니다!",
+            "✅ /채팅삭제, /채팅삭제플러스, /역할지급 명령어가 디스코드에 성공적으로 등록되었습니다!",
             {
               status: 200
             }
@@ -2721,6 +3155,39 @@ export default {
             options = []
           } = interaction.data;
 
+          /* ---------- /역할지급 ---------- */
+
+          if (
+            name ===
+            "역할지급"
+          ) {
+            const gate =
+              checkRoleGrantInteractionPermission(
+                interaction
+              );
+
+            if (!gate.ok) {
+              return interactionResponse(
+                gate.error
+              );
+            }
+
+            ctx.waitUntil(
+              handleRoleGrantCommand(
+                interaction,
+                env
+              )
+            );
+
+            // ephemeral 지연 응답 (시트/멤버 조회가 3초를 넘길 수 있음)
+            return json({
+              type: 5,
+              data: {
+                flags: 64
+              }
+            });
+          }
+
           const channelId =
             interaction
               .channel
@@ -2835,6 +3302,31 @@ export default {
             return json({
               type: 5
             });
+          }
+        }
+
+        /* ---------- Message Component (버튼) ---------- */
+
+        if (
+          interaction.type === 3
+        ) {
+          const customId =
+            String(
+              interaction.data
+                ?.custom_id ||
+                ""
+            );
+
+          if (
+            customId.startsWith(
+              "rolegrant:"
+            )
+          ) {
+            return handleRoleGrantComponent(
+              interaction,
+              env,
+              ctx
+            );
           }
         }
 
