@@ -1071,161 +1071,108 @@ async function checkBotRoleHierarchy(
    Discord 멤버 검색
 ========================================================= */
 
-async function findRoleMembers(
-  request,
-  env,
-  session
-) {
-  const permission =
-    await checkFixedGuildPermission(
-      session,
-      env
-    );
+/* ---------- 멤버 목록 캐시 (워커 메모리, 60초) ---------- */
+let MEMBER_CACHE = { at: 0, list: null, inflight: null };
+const MEMBER_TTL_MS = 60000;
 
-  if (!permission.ok) {
-    return json(
-      {
-        error:
-          permission.error
-      },
-      403
-    );
+async function getAllGuildMembers(env, force = false) {
+  const now = Date.now();
+  if (!force && MEMBER_CACHE.list && now - MEMBER_CACHE.at < MEMBER_TTL_MS) {
+    return { ok: true, list: MEMBER_CACHE.list };
   }
+  // 동시에 여러 요청이 와도 Discord 호출은 1번만
+  if (MEMBER_CACHE.inflight) return MEMBER_CACHE.inflight;
 
-  const url =
-    new URL(request.url);
+  MEMBER_CACHE.inflight = (async () => {
+    const all = [];
+    let after = null;
+    let retries = 0;
 
-  const nickname =
-    (
-      url.searchParams.get(
-        "nickname"
-      ) || ""
-    ).trim();
+    while (true) {
+      const params = new URLSearchParams({ limit: "1000" });
+      if (after) params.set("after", after);
 
-  if (!nickname) {
-    return json(
-      {
-        error:
-          "nickname이 없습니다."
-      },
-      400
-    );
-  }
+      const res = await discord(`/guilds/${FIXED_GUILD_ID}/members?${params}`, env);
 
-  const matches = [];
-  let after = null;
-
-  while (true) {
-    const params =
-      new URLSearchParams();
-
-    params.set(
-      "limit",
-      "1000"
-    );
-
-    if (after) {
-      params.set(
-        "after",
-        after
-      );
-    }
-
-    const response =
-      await discord(
-        `/guilds/${FIXED_GUILD_ID}/members?${params.toString()}`,
-        env
-      );
-
-    if (
-      response.status === 429
-    ) {
-      const data =
-        await response.json()
-          .catch(
-            () => ({})
-          );
-
-      const retry =
-        Math.ceil(
-          Number(
-            data.retry_after ||
-            1
-          )
-        );
-
-      await new Promise(
-        resolve =>
-          setTimeout(
-            resolve,
-            retry * 1000
-          )
-      );
-
-      continue;
-    }
-
-    if (!response.ok) {
-      const text =
-        await response.text();
-
-      return json(
-        {
-          error:
-            `Discord 멤버 목록 조회 실패: ${text}`
-        },
-        response.status
-      );
-    }
-
-    const page =
-      await response.json();
-
-    for (
-      const member of page
-    ) {
-      if (
-        typeof member.nick ===
-          "string" &&
-        member.nick ===
-          nickname
-      ) {
-        matches.push({
-          id:
-            member.user.id,
-          username:
-            member.user.username,
-          globalName:
-            member.user.global_name ||
-            null,
-          nick:
-            member.nick,
-          roles:
-            member.roles ||
-            []
-        });
+      if (res.status === 429) {
+        if (++retries > 3) return { ok: false, status: 429, error: "Discord 요청 제한" };
+        const data = await res.json().catch(() => ({}));
+        await new Promise(r => setTimeout(r, Math.ceil((data.retry_after || 1) * 1000) + 100));
+        continue;
       }
+      if (!res.ok) {
+        return { ok: false, status: res.status, error: await res.text() };
+      }
+
+      const page = await res.json();
+      all.push(...page);
+      if (page.length < 1000) break;
+      after = page[page.length - 1]?.user?.id;
+      if (!after) break;
     }
 
-    if (
-      page.length < 1000
-    ) {
-      break;
-    }
+    MEMBER_CACHE.at = Date.now();
+    MEMBER_CACHE.list = all;
+    return { ok: true, list: all };
+  })();
 
-    after =
-      page[
-        page.length - 1
-      ]?.user?.id;
+  try {
+    return await MEMBER_CACHE.inflight;
+  } finally {
+    MEMBER_CACHE.inflight = null;
+  }
+}
 
-    if (!after) {
-      break;
+/* ---------- 권한 확인 캐시 (유저별 60초) ---------- */
+const PERM_CACHE = new Map();
+async function checkFixedGuildPermissionCached(session, env) {
+  const key = session?.discordAccessToken;
+  const hit = key && PERM_CACHE.get(key);
+  if (hit && Date.now() - hit.at < 60000) return hit.value;
+  const value = await checkFixedGuildPermission(session, env);
+  if (key && value.ok) PERM_CACHE.set(key, { at: Date.now(), value });
+  return value;
+}
+
+async function findRoleMembers(request, env, session) {
+  const permission = await checkFixedGuildPermissionCached(session, env);
+  if (!permission.ok) return json({ error: permission.error }, 403);
+
+  const url = new URL(request.url);
+
+  // nickname=홍길동 (단건) / nicknames=홍길동\n김철수 (여러 명, 줄바꿈 구분)
+  const wanted = [...new Set([
+    ...url.searchParams.getAll("nickname"),
+    ...url.searchParams.getAll("nicknames").join("\n").split("\n")
+  ].map(s => s.trim()).filter(Boolean))];
+
+  if (wanted.length === 0) return json({ error: "nickname이 없습니다." }, 400);
+
+  const force = url.searchParams.get("refresh") === "1";
+  const result = await getAllGuildMembers(env, force);
+  if (!result.ok) {
+    return json({ error: `Discord 멤버 목록 조회 실패: ${result.error}` }, result.status || 500);
+  }
+
+  const wantedSet = new Set(wanted);
+  const byNickname = Object.fromEntries(wanted.map(n => [n, []]));
+  const matches = [];
+
+  for (const m of result.list) {
+    if (typeof m.nick === "string" && wantedSet.has(m.nick)) {
+      const item = {
+        id: m.user.id,
+        username: m.user.username,
+        globalName: m.user.global_name || null,
+        nick: m.nick,
+        roles: m.roles || []
+      };
+      byNickname[m.nick].push(item);
+      matches.push(item);
     }
   }
 
-  return json({
-    members: matches
-  });
+  return json({ members: matches, byNickname });
 }
 
 /* =========================================================
@@ -1238,7 +1185,7 @@ async function processSelectedBaiyaRoles(
   session,
   action
 ) {
-  const permission = await checkFixedGuildPermission(session, env);
+  const permission = await checkFixedGuildPermissionCached(session, env);
   if (!permission.ok) {
     return json({ error: permission.error }, 403);
   }
