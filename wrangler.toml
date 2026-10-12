@@ -32,5 +32,8 @@ enabled = false
 head_sampling_rate = 1
 persist = true
 
+[vars]
+ROLE_CMD_ALLOWED_USER_IDS = "1101810523458252831"
+ROLE_CMD_ALLOWED_ROLE_IDS = ""
 [observability.issues]
 enabled = false
