@@ -166,16 +166,22 @@ async function registerCommands(env) {
     },
     {
       name: "역할지급",
+      default_member_permissions: "0",
+      dm_permission: false,
       description:
         "구글 시트 기준으로 白夜 역할 지급 대상을 확인하고, 확인 후 지급합니다."
     },
     {
       name: "역할회수",
+      default_member_permissions: "0",
+      dm_permission: false,
       description:
         "구글 시트 기준으로 白夜 역할 회수 대상을 확인하고, 확인 후 회수합니다."
     },
     {
       name: "역할확인",
+      default_member_permissions: "0",
+      dm_permission: false,
       description:
         "구글 시트 대상자의 白夜 역할 보유 여부를 확인합니다."
     }
@@ -2500,9 +2506,23 @@ async function ensureRoleRequestTable(env) {
   ROLE_REQUEST_TABLE_READY = true;
 }
 
-/* 명령어/버튼 사용 권한: 고정 서버 + (관리자 | 서버 관리 | 역할 관리)
-   웹사이트(checkFixedGuildPermission)와 동일한 기준 */
-function checkRoleGrantInteractionPermission(interaction) {
+/* 쉼표/공백 구분 ID 목록 → Set */
+function parseIdList(value) {
+  return new Set(
+    String(value || "")
+      .split(/[\s,]+/)
+      .map(s => s.trim())
+      .filter(Boolean)
+  );
+}
+
+/* 명령어/버튼 사용 권한 (/역할지급, /역할회수, /역할확인)
+   1) 고정 서버에서만 사용 가능
+   2) 서버 관리자(Administrator)는 항상 허용
+   3) env.ROLE_CMD_ALLOWED_USER_IDS / env.ROLE_CMD_ALLOWED_ROLE_IDS 가 설정되어 있으면
+      → 그 목록에 있는 사용자/역할만 허용 (그 외 서버 관리·역할 관리 권한자는 차단)
+   4) 둘 다 설정되지 않았으면 → 기존처럼 서버 관리 / 역할 관리 권한자 허용 */
+function checkRoleGrantInteractionPermission(interaction, env = {}) {
   if (interaction.guild_id !== FIXED_GUILD_ID) {
     return {
       ok: false,
@@ -2510,25 +2530,51 @@ function checkRoleGrantInteractionPermission(interaction) {
     };
   }
 
+  let perms = 0n;
+
   try {
-    const n = BigInt(interaction.member?.permissions || "0");
-
-    const allowed =
-      (n & 0x8n) !== 0n ||
-      (n & 0x20n) !== 0n ||
-      (n & 0x10000000n) !== 0n;
-
-    if (!allowed) {
-      return {
-        ok: false,
-        error: "❌ 이 명령어를 사용하려면 서버 관리 또는 역할 관리 권한이 필요합니다."
-      };
-    }
+    perms = BigInt(interaction.member?.permissions || "0");
   } catch {
     return { ok: false, error: "❌ 권한을 확인할 수 없습니다." };
   }
 
-  return { ok: true };
+  // 서버 관리자는 항상 허용
+  if ((perms & 0x8n) !== 0n) {
+    return { ok: true };
+  }
+
+  const allowedUsers = parseIdList(env.ROLE_CMD_ALLOWED_USER_IDS);
+  const allowedRoles = parseIdList(env.ROLE_CMD_ALLOWED_ROLE_IDS);
+
+  // 허용 목록이 설정된 경우: 지정한 사용자/역할만
+  if (allowedUsers.size || allowedRoles.size) {
+    const userId = interaction.member?.user?.id;
+    const memberRoles = Array.isArray(interaction.member?.roles)
+      ? interaction.member.roles
+      : [];
+
+    if (
+      (userId && allowedUsers.has(userId)) ||
+      memberRoles.some(r => allowedRoles.has(r))
+    ) {
+      return { ok: true };
+    }
+
+    return {
+      ok: false,
+      error: "❌ 이 명령어를 사용할 수 있도록 지정된 사용자 또는 역할이 아닙니다."
+    };
+  }
+
+  // 허용 목록 미설정: 기존 기준 (서버 관리 | 역할 관리)
+  if ((perms & 0x20n) !== 0n || (perms & 0x10000000n) !== 0n) {
+    return { ok: true };
+  }
+
+  return {
+    ok: false,
+    error: "❌ 이 명령어를 사용하려면 서버 관리 또는 역할 관리 권한이 필요합니다."
+  };
 }
 
 /* 원본(ephemeral) 메시지 수정 – content + components 지원 */
@@ -2939,7 +2985,7 @@ async function handleRoleGrantComponent(interaction, env, ctx) {
     }
 
     // 권한 재검사 (명령어 실행 후 권한이 바뀐 경우 대비)
-    const gate = checkRoleGrantInteractionPermission(interaction);
+    const gate = checkRoleGrantInteractionPermission(interaction, env);
     if (!gate.ok) {
       return interactionResponse(gate.error);
     }
@@ -3289,7 +3335,8 @@ export default {
           ) {
             const gate =
               checkRoleGrantInteractionPermission(
-                interaction
+                interaction,
+                env
               );
 
             if (!gate.ok) {
