@@ -1251,23 +1251,37 @@ async function applyBaiyaRoleToUsers(env, userIds, action) {
   // ---------------------------------------------------------
   // 429 Rate Limit 자동 재시도가 포함된 Discord API 호출 함수
   // ---------------------------------------------------------
-  async function fetchDiscordWithRetry(path, options = {}, maxRetries = 3) {
+  // 역할 지급/회수 라우트는 Discord 쪽 버킷 제한(약 10회/10초)이 있어서
+  // 응답 헤더를 보고 미리 속도를 조절하고, 429 가 와도 길게 기다렸다 재시도한다.
+  const gate = { until: 0 };
+  const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+  async function fetchDiscordWithRetry(path, options = {}, maxRetries = 4) {
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      const wait = gate.until - Date.now();
+      if (wait > 0) await sleep(wait);
+
       const res = await discord(path, env, options);
 
       if (res.status === 429) {
         let retryAfter = 1;
         try {
-          const data = await res.json();
+          const data = await res.clone().json();
           retryAfter = Number(data.retry_after || 1);
         } catch {}
 
-        // 지연 시간이 너무 길면(5초 이상) 대기 없이 바로 에러 반환
-        if (retryAfter > 5) return res;
+        // 너무 길면(20초 초과) 포기
+        if (retryAfter > 20) return res;
 
-        // Discord가 지정한 시간 만큼 대기 후 재시도
-        await new Promise(resolve => setTimeout(resolve, Math.ceil(retryAfter * 1000) + 100));
+        gate.until = Math.max(gate.until, Date.now() + Math.ceil(retryAfter * 1000) + 100);
         continue;
+      }
+
+      // 버킷이 비었으면 리셋될 때까지 다음 요청을 미리 대기시킨다
+      const remaining = res.headers.get("x-ratelimit-remaining");
+      const resetAfter = Number(res.headers.get("x-ratelimit-reset-after") || 0);
+      if (remaining !== null && Number(remaining) <= 0 && resetAfter > 0) {
+        gate.until = Math.max(gate.until, Date.now() + Math.ceil(resetAfter * 1000) + 100);
       }
 
       return res;
@@ -1344,7 +1358,7 @@ async function applyBaiyaRoleToUsers(env, userIds, action) {
   let failed = 0;
   const failedMembers = [];
 
-  const CONCURRENCY = 5;
+  const CONCURRENCY = 3;
   const results = [];
   for (let i = 0; i < userIds.length; i += CONCURRENCY) {
     const chunk = userIds.slice(i, i + CONCURRENCY);
@@ -3158,6 +3172,15 @@ export default {
          Worker /
          명령어 등록
       ===================================================== */
+
+      if (
+        request.method ===
+          "GET" &&
+        url.pathname === "/" &&
+        !url.searchParams.has("register")
+      ) {
+        return new Response("OK", { status: 200 });
+      }
 
       if (
         request.method ===
