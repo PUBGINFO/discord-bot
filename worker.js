@@ -1201,8 +1201,8 @@ async function processSelectedBaiyaRoles(
     return json({ error: "선택된 멤버가 없습니다." }, 400);
   }
 
-  if (userIds.length > 100) {
-    return json({ error: "한 번에 최대 100명까지 처리할 수 있습니다." }, 400);
+  if (userIds.length > 40) {
+    return json({ error: "한 번에 최대 40명까지 처리할 수 있습니다." }, 400);
   }
 
   const outcome = await applyBaiyaRoleToUsers(env, userIds, action);
@@ -1220,6 +1220,8 @@ async function processSelectedBaiyaRoles(
    - 반환: { ok:false, status, error } 또는 { ok:true, action, role, total, success, already, failed, failedMembers }
 ========================================================= */
 
+let BOT_HIERARCHY_CACHE = { at: 0, value: null };
+
 async function applyBaiyaRoleToUsers(env, userIds, action) {
   const roleInfo = await getBaiyaRole(env);
   if (!roleInfo.ok) {
@@ -1229,7 +1231,14 @@ async function applyBaiyaRoleToUsers(env, userIds, action) {
     return { ok: false, status: 500, error: roleInfo.error };
   }
 
-  const hierarchy = await checkBotRoleHierarchy(env, roleInfo.roles);
+  // 봇 최고 역할 position 은 60초 캐시 (subrequest 2회 절약)
+  let hierarchy;
+  if (BOT_HIERARCHY_CACHE.value && Date.now() - BOT_HIERARCHY_CACHE.at < 60000) {
+    hierarchy = BOT_HIERARCHY_CACHE.value;
+  } else {
+    hierarchy = await checkBotRoleHierarchy(env, roleInfo.roles);
+    if (hierarchy.ok) BOT_HIERARCHY_CACHE = { at: Date.now(), value: hierarchy };
+  }
   if (!hierarchy.ok) {
     return { ok: false, status: 403, error: hierarchy.error };
   }
@@ -1267,62 +1276,80 @@ async function applyBaiyaRoleToUsers(env, userIds, action) {
   }
 
   // ---------------------------------------------------------
-  // 단일 유저 처리 로직 (GET 확인 -> PUT/DELETE 처리)
+  // 멤버 역할 보유 여부: 캐시된 멤버 목록으로 확인 (유저당 GET 제거)
+  // 캐시에 없는 멤버만 개별 GET 으로 fallback
   // ---------------------------------------------------------
-  async function processSingleUser(userId) {
-    // 1. 해당 멤버 단건 정보 조회
+  const roleMap = new Map();
+  try {
+    const all = await getAllGuildMembers(env);
+    if (all.ok) {
+      for (const m of all.list) {
+        if (m?.user?.id) roleMap.set(m.user.id, m);
+      }
+    }
+  } catch {}
+
+  async function getMemberRoles(userId) {
+    const cached = roleMap.get(userId);
+    if (cached) return { ok: true, roles: cached.roles || [], cached };
+
     const memberRes = await fetchDiscordWithRetry(`/guilds/${FIXED_GUILD_ID}/members/${userId}`);
-
-    if (!memberRes.ok) {
-      return { status: "failed", userId, error: `멤버 조회 실패 (HTTP ${memberRes.status})` };
-    }
-
+    if (!memberRes.ok) return { ok: false, status: memberRes.status };
     const member = await memberRes.json();
-    const hasRole = Array.isArray(member.roles) && member.roles.includes(BAIYA_ROLE_ID);
-
-    // 2. 역할 추가 / 제거 조건부 실행
-    if (action === "assign") {
-      if (hasRole) {
-        return { status: "already" }; // 이미 보유 중
-      }
-
-      const res = await fetchDiscordWithRetry(
-        `/guilds/${FIXED_GUILD_ID}/members/${userId}/roles/${BAIYA_ROLE_ID}`,
-        { method: "PUT" }
-      );
-
-      if (res.ok) {
-        return { status: "success" }; // 새로 지급 성공
-      } else {
-        return { status: "failed", userId, error: `HTTP ${res.status}` };
-      }
-    } else {
-      if (!hasRole) {
-        return { status: "already" }; // 이미 미보유 중
-      }
-
-      const res = await fetchDiscordWithRetry(
-        `/guilds/${FIXED_GUILD_ID}/members/${userId}/roles/${BAIYA_ROLE_ID}`,
-        { method: "DELETE" }
-      );
-
-      if (res.ok) {
-        return { status: "success" }; // 제거 성공
-      } else {
-        return { status: "failed", userId, error: `HTTP ${res.status}` };
-      }
-    }
+    return { ok: true, roles: member.roles || [], cached: null };
   }
 
   // ---------------------------------------------------------
-  // Promise.all 기반 비동기 병렬 실행
+  // 단일 유저 처리 로직 (보유 확인 -> PUT/DELETE)
+  // ---------------------------------------------------------
+  async function processSingleUser(userId) {
+    const info = await getMemberRoles(userId);
+
+    if (!info.ok) {
+      return { status: "failed", userId, error: `멤버 조회 실패 (HTTP ${info.status})` };
+    }
+
+    const hasRole = Array.isArray(info.roles) && info.roles.includes(BAIYA_ROLE_ID);
+
+    if (action === "assign" ? hasRole : !hasRole) {
+      return { status: "already" };
+    }
+
+    const res = await fetchDiscordWithRetry(
+      `/guilds/${FIXED_GUILD_ID}/members/${userId}/roles/${BAIYA_ROLE_ID}`,
+      { method: action === "assign" ? "PUT" : "DELETE" }
+    );
+
+    if (!res.ok) {
+      return { status: "failed", userId, error: `HTTP ${res.status}` };
+    }
+
+    // 캐시된 멤버 정보에도 변경 반영 (60초 캐시 내 중복 처리 방지)
+    if (info.cached) {
+      const cur = Array.isArray(info.cached.roles) ? info.cached.roles : [];
+      info.cached.roles =
+        action === "assign"
+          ? [...cur, BAIYA_ROLE_ID]
+          : cur.filter(r => r !== BAIYA_ROLE_ID);
+    }
+
+    return { status: "success" };
+  }
+
+  // ---------------------------------------------------------
+  // 동시 실행 제한 (429 감소)
   // ---------------------------------------------------------
   let success = 0;
   let already = 0;
   let failed = 0;
   const failedMembers = [];
 
-  const results = await Promise.all(userIds.map(id => processSingleUser(id)));
+  const CONCURRENCY = 5;
+  const results = [];
+  for (let i = 0; i < userIds.length; i += CONCURRENCY) {
+    const chunk = userIds.slice(i, i + CONCURRENCY);
+    results.push(...(await Promise.all(chunk.map(id => processSingleUser(id)))));
+  }
 
   for (const res of results) {
     if (res.status === "success") {
